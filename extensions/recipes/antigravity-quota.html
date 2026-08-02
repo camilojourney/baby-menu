@@ -33,7 +33,7 @@
           <ul class="list-disc space-y-2 pl-6">
             <li>Refresh only while the widget is visible, using the slowest acceptable interval of five minutes.</li>
             <li>Keep the last good result visibly stale when a later refresh fails.</li>
-            <li>Distinguish unavailable, sign-in-in-progress, timeout, oversized or malformed output, and parse failures.</li>
+            <li>Distinguish unavailable, sign-in-in-progress, trust-required, timeout, oversized or malformed output, and parse failures.</li>
           </ul>
         </div>
       </section>
@@ -64,12 +64,14 @@
           </p>
           <h3 class="text-xl font-semibold">Process ownership</h3>
           <ul class="list-disc space-y-2 pl-6">
-            <li>Spawn the Python PTY helper from Node with <code>detached: true</code>.</li>
+            <li>Spawn the Python PTY helper from Node with <code>detached: true</code> and Python isolated mode (<code>python3 -I -c</code>).</li>
+            <li>Create a fresh neutral directory under the OS temporary root for each probe, launch the helper and <code>agy</code> there with a matching <code>PWD</code>, and remove it after group cleanup so quota inspection never opens a project.</li>
+            <li>Never answer a project-trust prompt. Stop capture and return <code>Antigravity requested project trust during quota inspection</code> if one appears despite the neutral directory.</li>
             <li>Give the helper a dedicated host-liveness pipe on fd 4. Launch <code>agy</code> without <code>start_new_session=True</code> and with inherited descriptors closed, so helper and CLI stay in the same process group but only the helper owns the liveness pipe.</li>
             <li>After success or timeout, signal <code>-child.pid</code> with SIGTERM, allow a three-second grace period, then signal the same group with SIGKILL.</li>
             <li>Install a Python SIGTERM handler so its <code>finally</code> block can terminate and reap <code>agy</code>, then keep the helper alive after reporting its outcome until Node escalates. The live group leader anchors the PGID so it cannot be recycled during the grace period.</li>
             <li>Monitor fd 4 during capture and every anchor state. EOF proves the Node host exited, so the still-live group leader must signal its own PGID with SIGTERM, wait only the configured grace period, and then SIGKILL the group. Do not independently exit the helper while the lease remains open because a delayed Node timer could otherwise signal a recycled PGID.</li>
-            <li>Put all Python work after <code>Popen</code> inside <code>try/finally</code>, and wait after both terminate and kill so normal helper exit proves <code>agy</code> was reaped.</li>
+            <li>Put all Python work after <code>Popen</code> inside <code>try/finally</code>, use the configured three-second grace period when reaping the direct child, and wait after both terminate and kill so normal helper exit proves <code>agy</code> was reaped.</li>
             <li>Use a 35-second internal capture deadline and a 50-second Node timeout, leaving cleanup and encoding margin.</li>
             <li>Keep only a rolling 128 KiB raw PTY tail. Do not kill the helper merely because a redrawing TUI crossed a Node output cap.</li>
             <li>Do not sweep historical bare <code>agy</code> processes. A shared cwd, command name, or Baby Menu ancestor cannot prove ownership and could match a real user or worker session.</li>
@@ -82,7 +84,7 @@
           </p>
           <h3 class="text-xl font-semibold">Source outcomes</h3>
           <p>
-            Report a missing <code>agy</code> executable as <code>Antigravity CLI is unavailable</code>, an installed source that exits without a complete quota frame as <code>Antigravity quota is unavailable</code>, and an active browser authentication flow as <code>Antigravity sign-in is in progress</code>. The sign-in-in-progress result is transient and must not be replaced by a hard failure or timeout. Keep the separate capture-timeout and malformed-frame results.
+            Report a missing <code>agy</code> executable as <code>Antigravity CLI is unavailable</code>, an installed source that exits without a complete quota frame as <code>Antigravity quota is unavailable</code>, an active browser authentication flow as <code>Antigravity sign-in is in progress</code>, and an unexpected trust prompt as <code>Antigravity requested project trust during quota inspection</code>. The sign-in-in-progress result is transient and must not be replaced by a hard failure or timeout. Keep the separate trust-required, capture-timeout, and malformed-frame results.
           </p>
           <h3 class="text-xl font-semibold">Server action response shape</h3>
           <div class="mockup-code text-sm">
@@ -101,7 +103,7 @@
     } }
   | {
       ok: false;
-      status: "missing-agy" | "unavailable" | "sign-in-in-progress" | "timeout" | "malformed-output" | "python-unavailable" | "capture-failed";
+      status: "missing-agy" | "unavailable" | "sign-in-in-progress" | "trust-required" | "timeout" | "malformed-output" | "python-unavailable" | "capture-failed";
       error: string;
       transient?: true;
     };</code></pre>
@@ -140,7 +142,7 @@
             <li>A successful capture test proves process-group cleanup leaves no fake <code>agy</code> descendant alive while preserving decoded quota output.</li>
             <li>A timeout test proves the helper remains the group leader until escalation, preventing a stale PGID signal.</li>
             <li>A redraw test emits more than 256 KiB, returns successfully from the rolling tail, and preserves both quota buckets.</li>
-            <li>Focused tests preserve distinct missing-CLI, unavailable-source, sign-in-in-progress, internal-timeout, and outer-timeout results.</li>
+            <li>Focused tests preserve Python import isolation, neutral cwd, no trust-prompt consent, configured cleanup grace, and distinct missing-CLI, unavailable-source, sign-in-in-progress, trust-required, internal-timeout, and outer-timeout results.</li>
             <li>Tests preserve the normalized response shape and verify no other quota extension is modified.</li>
             <li>Verify the completed server action against the real <code>agy /usage</code> source using redacted output only.</li>
           </ul>

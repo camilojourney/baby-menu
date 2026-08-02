@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -204,6 +204,96 @@ printf 'Models & Quota\\nAntigravity (Google AI Ultra)\\nGEMINI MODELS\\nWeekly 
     });
   });
 
+  it("isolates the Python helper from inherited module search paths", async () => {
+    const fixture = await createAgyFixture(`
+printf 'Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Limit 91%%\\nCLAUDE AND GPT MODELS\\nWeekly Limit 64%%\\n'
+`);
+    const shadowMarker = join(fixture.directory, "shadow-imported");
+    await writeFile(
+      join(fixture.directory, "base64.py"),
+      `from pathlib import Path\nPath(${JSON.stringify(shadowMarker)}).write_text("imported")\n`,
+    );
+
+    const result = await captureUsageScreen({
+      env: { ...fixture.env, PYTHONPATH: fixture.directory },
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+
+    expect(result.ok).toBe(true);
+    await expect(readFile(shadowMarker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("runs quota inspection from the neutral temporary directory", async () => {
+    const fixture = await createAgyFixture("");
+    const cwdFile = join(fixture.directory, "agy.cwd");
+    await writeFile(
+      join(fixture.directory, "agy"),
+      `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.AGY_CWD_FILE, process.cwd() + "\\n" + process.env.PWD + "\\n");
+process.stdout.write("Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Limit 91%\\nCLAUDE AND GPT MODELS\\nWeekly Limit 64%\\n");
+`,
+    );
+
+    const result = await captureUsageScreen({
+      env: { ...fixture.env, AGY_CWD_FILE: cwdFile },
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+
+    expect(result.ok).toBe(true);
+    const [actualCwd, inheritedPwd] = (await readFile(cwdFile, "utf8")).trim().split("\n");
+    expect(actualCwd).toBe(inheritedPwd);
+    expect(actualCwd).toContain("baby-menu-antigravity-probe-");
+    await expect(realpath(actualCwd)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("reports project trust as required without accepting the prompt", async () => {
+    const fixture = await createAgyFixture(`
+printf 'Do you trust the contents of this project?'
+if IFS= read -r reply; then
+  printf '%s' "$reply" > "$AGY_CONSENT_FILE"
+fi
+while :; do sleep 0.02; done
+`);
+    const consentFile = join(fixture.directory, "consent.txt");
+
+    const result = await captureUsageScreen({
+      env: { ...fixture.env, AGY_CONSENT_FILE: consentFile },
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: "trust-required",
+      error: "Antigravity requested project trust during quota inspection",
+    });
+    await expect(readFile(consentFile, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("prefers a trust prompt received while settling a complete frame", async () => {
+    const fixture = await createAgyFixture(`
+printf 'Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Limit 91%%\\nCLAUDE AND GPT MODELS\\nWeekly Limit 64%%\\n'
+sleep 0.2
+printf 'Do you trust the contents of this project?'
+while :; do sleep 0.02; done
+`);
+
+    const result = await captureUsageScreen({
+      env: fixture.env,
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: "trust-required",
+      error: "Antigravity requested project trust during quota inspection",
+    });
+  });
+
   it("reports an unavailable quota source distinctly", async () => {
     const fixture = await createAgyFixture(`
 printf 'Antigravity service unavailable\n'
@@ -301,6 +391,15 @@ exit 1
         error: "Antigravity sign-in is in progress",
       },
     },
+    {
+      name: "project trust required",
+      body: "printf 'Do you trust the contents of this project?'\nwhile :; do sleep 0.02; done",
+      expected: {
+        ok: false,
+        status: "trust-required",
+        error: "Antigravity requested project trust during quota inspection",
+      },
+    },
   ])(
     "preserves the $name status through getQuota",
     async ({ body, expected }) => {
@@ -338,6 +437,24 @@ done
     });
     await expect(waitForProcessExit(agyPid)).resolves.toBeUndefined();
   });
+
+  it("allows the configured grace period for direct-child cleanup", async () => {
+    const fixture = await createAgyFixture(`
+trap 'sleep 2.2; echo graceful > "$CLEANUP_FILE"; exit 0' TERM
+printf 'Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Limit 91%%\\nCLAUDE AND GPT MODELS\\nWeekly Limit 64%%\\n'
+while :; do sleep 0.02; done
+`);
+    const cleanupFile = join(fixture.directory, "cleanup.complete");
+
+    const result = await captureUsageScreen({
+      env: { ...fixture.env, CLEANUP_FILE: cleanupFile },
+      timeoutMs: 8_000,
+      terminationGraceMs: 2_500,
+    });
+
+    expect(result.ok).toBe(true);
+    await expect(readFile(cleanupFile, "utf8")).resolves.toBe("graceful\n");
+  }, 10_000);
 
   it("reports the internal capture deadline as a timeout", async () => {
     const fixture = await createAgyFixture(`
@@ -487,7 +604,7 @@ echo "$PPID" > "$HELPER_PID_FILE"
   while :; do sleep 0.02; done
 ) &
 echo $! > "$DESCENDANT_PID_FILE"
-trap 'echo cleaning > "$CLEANUP_FILE"; sleep 0.5; exit 0' TERM
+trap 'echo cleaning > "$CLEANUP_FILE"; sleep 0.2; exit 0' TERM
 printf 'Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Limit 91%%\\nCLAUDE AND GPT MODELS\\nWeekly Limit 64%%\\n'
 while :; do sleep 0.02; done
 `);
@@ -497,7 +614,7 @@ while :; do sleep 0.02; done
     const runner = join(fixture.directory, "capture-host.ts");
     await writeFile(
       runner,
-      `import { captureUsageScreen } from ${JSON.stringify(fileURLToPath(new URL("../extensions/recipes/antigravity-quota.template.ts", import.meta.url)))};\nawait captureUsageScreen({ timeoutMs: 30_000, terminationGraceMs: 100 });\n`,
+      `import { captureUsageScreen } from ${JSON.stringify(fileURLToPath(new URL("../extensions/recipes/antigravity-quota.template.ts", import.meta.url)))};\nawait captureUsageScreen({ timeoutMs: 30_000, terminationGraceMs: 500 });\n`,
     );
     const host = spawn(process.execPath, ["--experimental-strip-types", runner], {
       env: {
@@ -515,8 +632,8 @@ while :; do sleep 0.02; done
       await waitForFile(cleanupFile);
       host.kill("SIGKILL");
       await expect(waitForProcessExit(host.pid!)).resolves.toBeUndefined();
-      await expect(waitForProcessExit(helperPid, 1_000)).resolves.toBeUndefined();
-      await expect(waitForProcessExit(descendantPid, 1_000)).resolves.toBeUndefined();
+      await expect(waitForProcessExit(helperPid, 2_000)).resolves.toBeUndefined();
+      await expect(waitForProcessExit(descendantPid, 2_000)).resolves.toBeUndefined();
     } finally {
       host.kill("SIGKILL");
       try {

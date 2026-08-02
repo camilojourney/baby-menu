@@ -57,6 +57,12 @@ describe("loadRecipes", () => {
     expect(html).toContain("dedicated host-liveness pipe on fd 4");
     expect(html).toContain("Monitor fd 4 during capture and every anchor state");
     expect(html).toContain("Antigravity sign-in is in progress");
+    expect(html).toContain("Python isolated mode");
+    expect(html).toContain("fresh neutral directory under the OS temporary root");
+    expect(html).toContain("matching <code>PWD</code>");
+    expect(html).toContain("Never answer a project-trust prompt");
+    expect(html).toContain("Antigravity requested project trust during quota inspection");
+    expect(html).toContain("configured three-second grace period when reaping the direct child");
     expect(html).toContain("recipes/antigravity-quota.template.ts");
     expect(html).toContain("rolling 128 KiB raw PTY tail");
     expect(html).toContain("35-second internal capture deadline and a 50-second Node timeout");

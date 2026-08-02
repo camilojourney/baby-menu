@@ -1,4 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const CAPTURE_TIMEOUT_MS = 50_000;
 const INTERNAL_CAPTURE_TIMEOUT_MS = 35_000;
@@ -25,6 +28,7 @@ type CaptureFailureStatus =
   | "missing-agy"
   | "unavailable"
   | "sign-in-in-progress"
+  | "trust-required"
   | "timeout"
   | "malformed-output"
   | "python-unavailable"
@@ -41,11 +45,19 @@ type CaptureOptions = {
 // the detached process group created by Node, as does agy, so the host always
 // has one group it can terminate even if the helper itself becomes stuck.
 const PTY_CAPTURE_SCRIPT = String.raw`
-import base64, fcntl, os, pty, re, select, signal, struct, subprocess, sys, termios, time
+import base64, fcntl, os, pty, re, select, shutil, signal, struct, subprocess, sys, termios, time
 
 TAIL_BYTES = 128 * 1024
 termination_requested = False
 self_cleanup_grace = float(sys.argv[2])
+probe_directory = os.getcwd()
+
+def remove_probe_directory():
+    try:
+        os.chdir("/")
+        shutil.rmtree(probe_directory)
+    except Exception:
+        pass
 
 def self_cleanup_group():
     try:
@@ -53,6 +65,7 @@ def self_cleanup_group():
     except ProcessLookupError:
         sys.exit(0)
     time.sleep(self_cleanup_grace)
+    remove_probe_directory()
     os.killpg(os.getpgrp(), signal.SIGKILL)
 
 def fail_closed_excepthook(exc_type, exc_value, traceback):
@@ -121,11 +134,13 @@ def sign_in_in_progress(text):
     )
     return any(re.search(pattern, text, re.IGNORECASE | re.DOTALL) for pattern in patterns)
 
+def trust_required(text):
+    return "do you trust the contents of this project?" in text.lower()
+
 master, slave = pty.openpty()
 proc = None
 buffer = bytearray()
 sent_usage = False
-trusted = False
 capture_timed_out = False
 sign_in_detected = False
 deadline = time.time() + float(sys.argv[1])
@@ -135,6 +150,7 @@ try:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 220, 0, 0))
 
     env = os.environ.copy()
+    env["PWD"] = os.getcwd()
     if env.get("TERM", "").lower() in ("", "dumb", "unknown"):
         env["TERM"] = "xterm-256color"
 
@@ -168,9 +184,8 @@ try:
             if len(buffer) > TAIL_BYTES:
                 del buffer[:-TAIL_BYTES]
             text = buffer.decode("utf-8", errors="ignore")
-            if not trusted and "Do you trust the contents of this project?" in text:
-                os.write(master, b"\r")
-                trusted = True
+            if trust_required(text):
+                break
             if not sent_usage and "? for shortcuts" in text:
                 os.write(master, b"/usage\r")
                 sent_usage = True
@@ -221,11 +236,11 @@ finally:
         except Exception:
             pass
         try:
-            proc.wait(timeout=2)
+            proc.wait(timeout=self_cleanup_grace)
         except Exception:
             try:
                 proc.kill()
-                proc.wait(timeout=2)
+                proc.wait(timeout=self_cleanup_grace)
             except Exception:
                 pass
 
@@ -233,6 +248,9 @@ if termination_requested:
     anchor_group()
 
 final_text = buffer.decode("utf-8", errors="ignore")
+if trust_required(final_text):
+    report("trust-required")
+
 if not latest_frame_complete(final_text) and sign_in_detected:
     report("sign-in-in-progress")
 
@@ -264,6 +282,11 @@ const HELPER_FAILURES = {
     transient: true,
     error: "Antigravity sign-in is in progress",
   },
+  "trust-required": {
+    ok: false,
+    status: "trust-required",
+    error: "Antigravity requested project trust during quota inspection",
+  },
 } as const;
 
 type HelperFailureOutcome = keyof typeof HELPER_FAILURES;
@@ -272,15 +295,17 @@ function isHelperFailureOutcome(outcome: string): outcome is HelperFailureOutcom
   return Object.hasOwn(HELPER_FAILURES, outcome);
 }
 
-export function captureUsageScreen(options: CaptureOptions = {}): Promise<CaptureResult> {
+export async function captureUsageScreen(options: CaptureOptions = {}): Promise<CaptureResult> {
   const internalCaptureTimeoutMs = options.internalCaptureTimeoutMs ?? INTERNAL_CAPTURE_TIMEOUT_MS;
   const timeoutMs = options.timeoutMs ?? CAPTURE_TIMEOUT_MS;
   const terminationGraceMs = options.terminationGraceMs ?? TERMINATION_GRACE_MS;
+  const probeDirectory = await mkdtemp(join(tmpdir(), "baby-menu-antigravity-probe-"));
 
   return new Promise((resolve) => {
     const child = spawn(
       "python3",
       [
+        "-I",
         "-c",
         PTY_CAPTURE_SCRIPT,
         String(internalCaptureTimeoutMs / 1_000),
@@ -288,6 +313,7 @@ export function captureUsageScreen(options: CaptureOptions = {}): Promise<Captur
       ],
       {
         detached: true,
+        cwd: probeDirectory,
         env: options.env,
         stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
       },
@@ -304,7 +330,10 @@ export function captureUsageScreen(options: CaptureOptions = {}): Promise<Captur
       settled = true;
       clearTimeout(timeout);
       if (escalation) clearTimeout(escalation);
-      resolve(result);
+      void rm(probeDirectory, { recursive: true, force: true }).then(
+        () => resolve(result),
+        () => resolve(result),
+      );
     };
 
     const stopGroup = (result: CaptureResult | (() => CaptureResult)) => {

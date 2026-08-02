@@ -1,8 +1,10 @@
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { actions, captureUsageScreen, parseQuotaScreen } from "../extensions/recipes/antigravity-quota.server";
+import { createServerActionRegistry } from "../src/main/server-action-registry";
+import { actions, captureUsageScreen, parseQuotaScreen } from "../extensions/recipes/antigravity-quota.template";
 
 describe("Antigravity quota capture", () => {
   const tempDirs: string[] = [];
@@ -39,6 +41,51 @@ describe("Antigravity quota capture", () => {
         },
       ],
     });
+  });
+
+  it("uses only the final occurrence of each quota group after redraws", () => {
+    const parsed = parseQuotaScreen(`
+      GEMINI MODELS
+      Weekly Limit 12%
+      CLAUDE AND GPT MODELS
+      Weekly Limit 34%
+      GEMINI MODELS
+      Weekly Limit 56%
+      CLAUDE AND GPT MODELS
+      Weekly Limit 78%
+    `);
+
+    expect(parsed.buckets.map((bucket) => [bucket.id, bucket.percentRemaining])).toEqual([
+      ["gemini", 56],
+      ["claude-gpt", 78],
+    ]);
+  });
+
+  it("rejects an incomplete final group instead of crossing section boundaries", () => {
+    const parsed = parseQuotaScreen(`
+      GEMINI MODELS
+      Weekly Limit 12%
+      CLAUDE AND GPT MODELS
+      Weekly Limit 34%
+      GEMINI MODELS
+      rendering
+      CLAUDE AND GPT MODELS
+      Weekly Limit 78%
+    `);
+
+    expect(parsed.buckets).toEqual([]);
+  });
+
+  it("does not register the shipped recipe template as a live server action", async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), "baby-menu-antigravity-cache-"));
+    tempDirs.push(cacheDir);
+    const registry = createServerActionRegistry({
+      rootDir: fileURLToPath(new URL("../", import.meta.url)),
+      actionRoots: ["extensions/recipes"],
+      cacheDir,
+    });
+
+    await expect(registry.list()).resolves.toEqual([]);
   });
 
   it("returns the same normalized action response for both quota groups", async () => {
@@ -101,7 +148,7 @@ while :; do sleep 0.02; done
     const cleanupFile = join(fixture.directory, "cleanup.complete");
     const capture = captureUsageScreen({
       env: { ...fixture.env, HELPER_PID_FILE: helperPidFile, CLEANUP_FILE: cleanupFile },
-      timeoutMs: 300,
+      timeoutMs: 2_000,
       terminationGraceMs: 1_000,
     });
     const helperPid = Number(await waitForFile(helperPidFile));

@@ -203,21 +203,35 @@ function cleanTerminal(text: string): string {
 export function parseQuotaScreen(raw: string): { plan?: string; buckets: QuotaBucket[] } {
   const text = cleanTerminal(raw);
   const planMatch = text.match(/\((Google AI [^)]+)\)/);
-  const groupPattern = /(GEMINI MODELS|CLAUDE AND GPT MODELS)[\s\S]*?Weekly Limit[\s\S]*?(\d+(?:\.\d+)?)%/g;
-  const buckets: QuotaBucket[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = groupPattern.exec(text)) !== null) {
-    const percentRemaining = Math.max(0, Math.min(100, Number(match[2])));
-    const gemini = match[1] === "GEMINI MODELS";
-    buckets.push({
-      id: gemini ? "gemini" : "claude-gpt",
-      label: gemini ? "Gemini models" : "Claude + GPT models",
-      percentUsed: 100 - percentRemaining,
-      percentRemaining,
-      windowLabel: "weekly",
-    });
-  }
+  const headers = ["GEMINI MODELS", "CLAUDE AND GPT MODELS"] as const;
+  const values = headers.map((header) => {
+    const start = text.lastIndexOf(header);
+    if (start < 0) return null;
+    const nextHeader = headers
+      .map((candidate) => text.indexOf(candidate, start + header.length))
+      .filter((index) => index >= 0)
+      .reduce((nearest, index) => Math.min(nearest, index), text.length);
+    const match = text.slice(start + header.length, nextHeader).match(/Weekly Limit[\s\S]*?(\d+(?:\.\d+)?)%/);
+    return match ? Math.max(0, Math.min(100, Number(match[1]))) : null;
+  });
+  const buckets: QuotaBucket[] = values.every((value): value is number => value !== null)
+    ? [
+        {
+          id: "gemini",
+          label: "Gemini models",
+          percentUsed: 100 - values[0],
+          percentRemaining: values[0],
+          windowLabel: "weekly",
+        },
+        {
+          id: "claude-gpt",
+          label: "Claude + GPT models",
+          percentUsed: 100 - values[1],
+          percentRemaining: values[1],
+          windowLabel: "weekly",
+        },
+      ]
+    : [];
 
   return { plan: planMatch?.[1], buckets };
 }
@@ -228,7 +242,7 @@ export const actions = {
     if (!capture.ok) return capture;
 
     const parsed = parseQuotaScreen(capture.output);
-    if (parsed.buckets.length === 0) {
+    if (parsed.buckets.length !== 2) {
       return { ok: false as const, error: "Antigravity /usage did not report model quota" };
     }
 

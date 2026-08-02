@@ -54,7 +54,7 @@ describe("loadRecipes", () => {
     expect(html).toContain("without <code>start_new_session=True</code>");
     expect(html).toContain("signal <code>-child.pid</code> with SIGTERM");
     expect(html).toContain("live group leader anchors the PGID");
-    expect(html).toContain("recipes/antigravity-quota.server.ts");
+    expect(html).toContain("recipes/antigravity-quota.template.ts");
     expect(html).toContain("rolling 128 KiB raw PTY tail");
     expect(html).toContain("35-second internal capture deadline and a 50-second Node timeout");
     expect(html).toContain("Do not sweep historical bare <code>agy</code> processes");

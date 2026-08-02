@@ -76,6 +76,74 @@ describe("Antigravity quota capture", () => {
     expect(parsed.buckets).toEqual([]);
   });
 
+  it("rejects a partial final redraw instead of mixing it with the prior frame", () => {
+    const partialGroups = parseQuotaScreen(`
+      Models & Quota
+      Antigravity (Google AI Pro)
+      GEMINI MODELS
+      Weekly Limit 12%
+      CLAUDE AND GPT MODELS
+      Weekly Limit 34%
+      GEMINI MODELS
+      Weekly Limit 56%
+    `);
+    const partialTitle = parseQuotaScreen(`
+      Models & Quota
+      Antigravity (Google AI Pro)
+      GEMINI MODELS
+      Weekly Limit 12%
+      CLAUDE AND GPT MODELS
+      Weekly Limit 34%
+      Models & Quota
+      Antigravity (Google AI Ultra)
+    `);
+
+    expect(partialGroups).toEqual({ plan: undefined, buckets: [] });
+    expect(partialTitle).toEqual({ plan: undefined, buckets: [] });
+  });
+
+  it("rejects a final frame with duplicate weekly quota values", () => {
+    const parsed = parseQuotaScreen(`
+      Models & Quota
+      Antigravity (Google AI Pro)
+      GEMINI MODELS
+      Weekly Limit 12%
+      Weekly Limit 56%
+      CLAUDE AND GPT MODELS
+      Weekly Limit 78%
+    `);
+
+    expect(parsed).toEqual({ plan: "Google AI Pro", buckets: [] });
+  });
+
+  it("rejects duplicate model group sections within the final titled frame", () => {
+    const parsed = parseQuotaScreen(`
+      Models & Quota
+      Antigravity (Google AI Pro)
+      GEMINI MODELS
+      Weekly Limit 12%
+      GEMINI MODELS
+      Weekly Limit 56%
+      CLAUDE AND GPT MODELS
+      Weekly Limit 78%
+    `);
+
+    expect(parsed).toEqual({ plan: undefined, buckets: [] });
+  });
+
+  it("rejects out-of-order model groups within the final titled frame", () => {
+    const parsed = parseQuotaScreen(`
+      Models & Quota
+      Antigravity (Google AI Pro)
+      CLAUDE AND GPT MODELS
+      Weekly Limit 78%
+      GEMINI MODELS
+      Weekly Limit 56%
+    `);
+
+    expect(parsed).toEqual({ plan: undefined, buckets: [] });
+  });
+
   it("does not register the shipped recipe template as a live server action", async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), "baby-menu-antigravity-cache-"));
     tempDirs.push(cacheDir);

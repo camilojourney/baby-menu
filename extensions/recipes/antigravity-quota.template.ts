@@ -202,19 +202,37 @@ function cleanTerminal(text: string): string {
 
 export function parseQuotaScreen(raw: string): { plan?: string; buckets: QuotaBucket[] } {
   const text = cleanTerminal(raw);
-  const planMatch = text.match(/\((Google AI [^)]+)\)/);
-  const headers = ["GEMINI MODELS", "CLAUDE AND GPT MODELS"] as const;
-  const values = headers.map((header) => {
-    const start = text.lastIndexOf(header);
-    if (start < 0) return null;
-    const nextHeader = headers
-      .map((candidate) => text.indexOf(candidate, start + header.length))
-      .filter((index) => index >= 0)
-      .reduce((nearest, index) => Math.min(nearest, index), text.length);
-    const match = text.slice(start + header.length, nextHeader).match(/Weekly Limit[\s\S]*?(\d+(?:\.\d+)?)%/);
-    return match ? Math.max(0, Math.min(100, Number(match[1]))) : null;
+  const geminiHeader = "GEMINI MODELS";
+  const claudeHeader = "CLAUDE AND GPT MODELS";
+  const geminiStart = text.lastIndexOf(geminiHeader);
+  const latestTitleStart = text.lastIndexOf("Models & Quota");
+  if (geminiStart < 0 || latestTitleStart > geminiStart) return { plan: undefined, buckets: [] };
+  const priorGeminiStart = text.lastIndexOf(geminiHeader, geminiStart - 1);
+  const priorClaudeStart = text.lastIndexOf(claudeHeader, geminiStart - 1);
+  const framePreludeStart = Math.max(priorGeminiStart, priorClaudeStart);
+  const frameStart = latestTitleStart >= 0 ? latestTitleStart : geminiStart;
+  const frame = text.slice(frameStart);
+  const frameGeminiStart = frame.indexOf(geminiHeader);
+  const claudeStart = frame.indexOf(claudeHeader);
+  const framePrelude = latestTitleStart >= 0
+    ? frame.slice(0, frameGeminiStart)
+    : text.slice(framePreludeStart < 0 ? 0 : framePreludeStart, geminiStart);
+  const planMatch = framePrelude.match(/\((Google AI [^)]+)\)/);
+  const hasDuplicateHeader =
+    frame.indexOf(geminiHeader, frameGeminiStart + geminiHeader.length) >= 0 ||
+    (claudeStart >= 0 && frame.indexOf(claudeHeader, claudeStart + claudeHeader.length) >= 0);
+  const sections =
+    frameGeminiStart >= 0 && claudeStart > frameGeminiStart && !hasDuplicateHeader
+      ? [frame.slice(frameGeminiStart + geminiHeader.length, claudeStart), frame.slice(claudeStart + claudeHeader.length)]
+      : [];
+  const values = sections.map((section) => {
+    const matches = [...section.matchAll(/Weekly Limit[\s\S]*?(\d+(?:\.\d+)?)%/g)];
+    const weeklyLimits = [...section.matchAll(/Weekly Limit/g)];
+    return matches.length === 1 && weeklyLimits.length === 1
+      ? Math.max(0, Math.min(100, Number(matches[0][1])))
+      : null;
   });
-  const buckets: QuotaBucket[] = values.every((value): value is number => value !== null)
+  const buckets: QuotaBucket[] = values.length === 2 && values.every((value): value is number => value !== null)
     ? [
         {
           id: "gemini",
@@ -233,7 +251,7 @@ export function parseQuotaScreen(raw: string): { plan?: string; buckets: QuotaBu
       ]
     : [];
 
-  return { plan: planMatch?.[1], buckets };
+  return { plan: sections.length === 2 ? planMatch?.[1] : undefined, buckets };
 }
 
 export const actions = {

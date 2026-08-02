@@ -527,6 +527,43 @@ while :; do sleep 0.02; done
     }
   });
 
+  it("cleans the helper process group after an unexpected PTY write failure", async () => {
+    const fixture = await createAgyFixture(`
+(
+  trap '' TERM HUP
+  while :; do sleep 0.02; done
+) </dev/null >/dev/null 2>&1 &
+echo $! > "$DESCENDANT_PID_FILE"
+printf '? for shortcuts\n'
+exec 0>&- 1>&- 2>&-
+trap '' TERM
+while :; do sleep 0.02; done
+`);
+    const descendantPidFile = join(fixture.directory, "descendant.pid");
+    const capture = captureUsageScreen({
+      env: { ...fixture.env, DESCENDANT_PID_FILE: descendantPidFile },
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+    const descendantPid = Number(await waitForFile(descendantPidFile));
+    const result = await capture;
+
+    try {
+      expect(result).toEqual({
+        ok: false,
+        status: "capture-failed",
+        error: "Antigravity quota capture failed",
+      });
+      await expect(waitForProcessExit(descendantPid, 500)).resolves.toBeUndefined();
+    } finally {
+      try {
+        process.kill(descendantPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+  });
+
   it("keeps only the final rendered screen when a TUI redraws beyond the old byte cap", async () => {
     const fixture = await createAgyFixture(`
 i=0

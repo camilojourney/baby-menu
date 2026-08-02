@@ -55,6 +55,11 @@ def self_cleanup_group():
     time.sleep(self_cleanup_grace)
     os.killpg(os.getpgrp(), signal.SIGKILL)
 
+def fail_closed_excepthook(exc_type, exc_value, traceback):
+    self_cleanup_group()
+
+sys.excepthook = fail_closed_excepthook
+
 def host_is_alive(timeout):
     ready, _, _ = select.select([4], [], [], timeout)
     if ready and not os.read(4, 1):

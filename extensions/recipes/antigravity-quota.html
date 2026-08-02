@@ -33,7 +33,7 @@
           <ul class="list-disc space-y-2 pl-6">
             <li>Refresh only while the widget is visible, using the slowest acceptable interval of five minutes.</li>
             <li>Keep the last good result visibly stale when a later refresh fails.</li>
-            <li>Distinguish unavailable, sign-in-in-progress, trust-required, timeout, oversized or malformed output, and parse failures.</li>
+            <li>Distinguish unavailable, sign-in-in-progress, trust-required, timeout, malformed output, and capture failures.</li>
           </ul>
         </div>
       </section>
@@ -68,7 +68,7 @@
             <li>Create a fresh neutral directory under the OS temporary root for each probe, launch the helper and <code>agy --new-project</code> there with a matching <code>PWD</code>, and remove it after group cleanup so quota inspection never opens an existing project or requires project trust.</li>
             <li>Never answer a project-trust prompt. Stop capture and return <code>Antigravity requested project trust during quota inspection</code> if one appears despite the neutral directory.</li>
             <li>Give the helper a dedicated host-liveness pipe on fd 4. Launch <code>agy</code> without <code>start_new_session=True</code> and with inherited descriptors closed, so helper and CLI stay in the same process group but only the helper owns the liveness pipe.</li>
-            <li>After success or timeout, signal <code>-child.pid</code> with SIGTERM, allow a three-second grace period, then signal the same group with SIGKILL.</li>
+            <li>After any helper-reported outcome or the Node timeout, signal <code>-child.pid</code> with SIGTERM, allow a three-second grace period, then signal the same group with SIGKILL.</li>
             <li>Install a Python SIGTERM handler so its <code>finally</code> block can terminate and reap <code>agy</code>, then keep the helper alive after reporting its outcome until Node escalates. The live group leader anchors the PGID so it cannot be recycled during the grace period.</li>
             <li>Monitor fd 4 during capture and every anchor state. EOF proves the Node host exited, so the still-live group leader must signal its own PGID with SIGTERM, wait only the configured grace period, and then SIGKILL the group. Do not independently exit the helper while the lease remains open because a delayed Node timer could otherwise signal a recycled PGID.</li>
             <li>Put all Python work after <code>Popen</code> inside <code>try/finally</code>, use the configured three-second grace period when reaping the direct child, and wait after both terminate and kill so normal helper exit proves <code>agy</code> was reaped.</li>

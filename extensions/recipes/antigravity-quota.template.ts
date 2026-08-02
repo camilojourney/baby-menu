@@ -25,7 +25,7 @@ type CaptureOptions = {
 // the detached process group created by Node, as does agy, so the host always
 // has one group it can terminate even if the helper itself becomes stuck.
 const PTY_CAPTURE_SCRIPT = String.raw`
-import base64, fcntl, os, pty, select, signal, struct, subprocess, sys, termios, time
+import base64, fcntl, os, pty, re, select, signal, struct, subprocess, sys, termios, time
 
 TAIL_BYTES = 128 * 1024
 termination_requested = False
@@ -42,6 +42,33 @@ def stop(signum, frame):
         anchor_group()
 
 signal.signal(signal.SIGTERM, stop)
+
+def latest_frame_complete(text):
+    title = "Models & Quota"
+    gemini_header = "GEMINI MODELS"
+    claude_header = "CLAUDE AND GPT MODELS"
+    frame_start = text.rfind(title)
+    if frame_start < 0:
+        return False
+    frame = text[frame_start:]
+    gemini_start = frame.find(gemini_header)
+    claude_start = frame.find(claude_header)
+    if gemini_start < 0 or claude_start <= gemini_start:
+        return False
+    if frame.find(gemini_header, gemini_start + len(gemini_header)) >= 0:
+        return False
+    if frame.find(claude_header, claude_start + len(claude_header)) >= 0:
+        return False
+    sections = (
+        frame[gemini_start + len(gemini_header):claude_start],
+        frame[claude_start + len(claude_header):],
+    )
+    for section in sections:
+        if len(re.findall(r"Weekly Limit", section)) != 1:
+            return False
+        if len(re.findall(r"Weekly Limit[\s\S]*?(\d+(?:\.\d+)?)%", section)) != 1:
+            return False
+    return True
 
 master, slave = pty.openpty()
 proc = None
@@ -83,7 +110,7 @@ try:
             if not sent_usage and "? for shortcuts" in text:
                 os.write(master, b"/usage\r")
                 sent_usage = True
-            if "Models & Quota" in text and text.count("Weekly Limit") >= 2:
+            if latest_frame_complete(text):
                 time.sleep(1)
                 ready, _, _ = select.select([master], [], [], 0.5)
                 if ready:
@@ -93,7 +120,9 @@ try:
                             del buffer[:-TAIL_BYTES]
                     except OSError:
                         pass
-                break
+                text = buffer.decode("utf-8", errors="ignore")
+                if latest_frame_complete(text):
+                    break
 finally:
     if slave is not None:
         try:
@@ -202,29 +231,21 @@ function cleanTerminal(text: string): string {
 
 export function parseQuotaScreen(raw: string): { plan?: string; buckets: QuotaBucket[] } {
   const text = cleanTerminal(raw);
+  const title = "Models & Quota";
   const geminiHeader = "GEMINI MODELS";
   const claudeHeader = "CLAUDE AND GPT MODELS";
-  const geminiStart = text.lastIndexOf(geminiHeader);
-  const latestTitleStart = text.lastIndexOf("Models & Quota");
-  if (geminiStart < 0 || latestTitleStart > geminiStart) return { plan: undefined, buckets: [] };
-  const priorGeminiStart = text.lastIndexOf(geminiHeader, geminiStart - 1);
-  const priorClaudeStart = text.lastIndexOf(claudeHeader, geminiStart - 1);
-  const framePreludeStart = Math.max(priorGeminiStart, priorClaudeStart);
-  const frameStart = latestTitleStart >= 0 ? latestTitleStart : geminiStart;
+  const frameStart = text.lastIndexOf(title);
+  if (frameStart < 0) return { plan: undefined, buckets: [] };
   const frame = text.slice(frameStart);
-  const frameGeminiStart = frame.indexOf(geminiHeader);
+  const geminiStart = frame.indexOf(geminiHeader);
   const claudeStart = frame.indexOf(claudeHeader);
-  const framePrelude = latestTitleStart >= 0
-    ? frame.slice(0, frameGeminiStart)
-    : text.slice(framePreludeStart < 0 ? 0 : framePreludeStart, geminiStart);
-  const planMatch = framePrelude.match(/\((Google AI [^)]+)\)/);
   const hasDuplicateHeader =
-    frame.indexOf(geminiHeader, frameGeminiStart + geminiHeader.length) >= 0 ||
+    frame.indexOf(geminiHeader, geminiStart + geminiHeader.length) >= 0 ||
     (claudeStart >= 0 && frame.indexOf(claudeHeader, claudeStart + claudeHeader.length) >= 0);
-  const sections =
-    frameGeminiStart >= 0 && claudeStart > frameGeminiStart && !hasDuplicateHeader
-      ? [frame.slice(frameGeminiStart + geminiHeader.length, claudeStart), frame.slice(claudeStart + claudeHeader.length)]
-      : [];
+  if (geminiStart < 0 || claudeStart <= geminiStart || hasDuplicateHeader) {
+    return { plan: undefined, buckets: [] };
+  }
+  const sections = [frame.slice(geminiStart + geminiHeader.length, claudeStart), frame.slice(claudeStart + claudeHeader.length)];
   const values = sections.map((section) => {
     const matches = [...section.matchAll(/Weekly Limit[\s\S]*?(\d+(?:\.\d+)?)%/g)];
     const weeklyLimits = [...section.matchAll(/Weekly Limit/g)];
@@ -232,26 +253,29 @@ export function parseQuotaScreen(raw: string): { plan?: string; buckets: QuotaBu
       ? Math.max(0, Math.min(100, Number(matches[0][1])))
       : null;
   });
-  const buckets: QuotaBucket[] = values.length === 2 && values.every((value): value is number => value !== null)
-    ? [
-        {
-          id: "gemini",
-          label: "Gemini models",
-          percentUsed: 100 - values[0],
-          percentRemaining: values[0],
-          windowLabel: "weekly",
-        },
-        {
-          id: "claude-gpt",
-          label: "Claude + GPT models",
-          percentUsed: 100 - values[1],
-          percentRemaining: values[1],
-          windowLabel: "weekly",
-        },
-      ]
-    : [];
-
-  return { plan: sections.length === 2 ? planMatch?.[1] : undefined, buckets };
+  if (!values.every((value): value is number => value !== null)) {
+    return { plan: undefined, buckets: [] };
+  }
+  const plan = frame.slice(0, geminiStart).match(/\((Google AI [^)]+)\)/)?.[1];
+  return {
+    plan,
+    buckets: [
+      {
+        id: "gemini",
+        label: "Gemini models",
+        percentUsed: 100 - values[0],
+        percentRemaining: values[0],
+        windowLabel: "weekly",
+      },
+      {
+        id: "claude-gpt",
+        label: "Claude + GPT models",
+        percentUsed: 100 - values[1],
+        percentRemaining: values[1],
+        windowLabel: "weekly",
+      },
+    ],
+  };
 }
 
 export const actions = {

@@ -15,6 +15,7 @@ describe("Antigravity quota capture", () => {
 
   it("preserves the quota shape for both weekly groups", () => {
     const parsed = parseQuotaScreen(`
+      Models & Quota
       Antigravity (Google AI Pro)
       GEMINI MODELS
       Weekly Limit 100%
@@ -45,10 +46,12 @@ describe("Antigravity quota capture", () => {
 
   it("uses only the final occurrence of each quota group after redraws", () => {
     const parsed = parseQuotaScreen(`
+      Models & Quota
       GEMINI MODELS
       Weekly Limit 12%
       CLAUDE AND GPT MODELS
       Weekly Limit 34%
+      Models & Quota
       GEMINI MODELS
       Weekly Limit 56%
       CLAUDE AND GPT MODELS
@@ -113,7 +116,7 @@ describe("Antigravity quota capture", () => {
       Weekly Limit 78%
     `);
 
-    expect(parsed).toEqual({ plan: "Google AI Pro", buckets: [] });
+    expect(parsed).toEqual({ plan: undefined, buckets: [] });
   });
 
   it("rejects duplicate model group sections within the final titled frame", () => {
@@ -246,6 +249,28 @@ printf '\\nModels & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly
     if (!result.ok) return;
     expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(128 * 1024);
     expect(parseQuotaScreen(result.output).buckets.map((bucket) => bucket.percentRemaining)).toEqual([100, 88]);
+  });
+
+  it("waits for a complete latest frame after a partial redraw", async () => {
+    const fixture = await createAgyFixture(`
+printf 'Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Limit 91%%\\nCLAUDE AND GPT MODELS\\nWeekly Limit 64%%\\n'
+sleep 0.2
+printf 'Models & Quota\\nAntigravity (Google AI Ultra)\\nGEMINI MODELS\\nWeekly Limit 77%%\\n'
+sleep 1.2
+printf 'CLAUDE AND GPT MODELS\\nWeekly Limit 42%%\\n'
+`);
+
+    const result = await captureUsageScreen({ env: fixture.env, timeoutMs: 5_000 });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(parseQuotaScreen(result.output)).toMatchObject({
+      plan: "Google AI Ultra",
+      buckets: [
+        { id: "gemini", percentRemaining: 77 },
+        { id: "claude-gpt", percentRemaining: 42 },
+      ],
+    });
   });
 
   async function createAgyFixture(body: string) {

@@ -156,7 +156,7 @@ try:
 
     try:
         proc = subprocess.Popen(
-            ["agy"], stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True,
+            ["agy", "--new-project"], stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True,
         )
     except FileNotFoundError:
         os.close(slave)

@@ -249,6 +249,24 @@ process.stdout.write("Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODE
     await expect(realpath(actualCwd)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("starts a new project so the neutral directory does not require trust", async () => {
+    const fixture = await createAgyFixture(`
+if [ "$1" != "--new-project" ]; then
+  printf 'Do you trust the contents of this project?'
+  while :; do sleep 0.02; done
+fi
+printf 'Models & Quota\nAntigravity (Google AI Pro)\nGEMINI MODELS\nWeekly Limit 91%%\nCLAUDE AND GPT MODELS\nWeekly Limit 64%%\n'
+`);
+
+    const result = await captureUsageScreen({
+      env: fixture.env,
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
   it("reports project trust as required without accepting the prompt", async () => {
     const fixture = await createAgyFixture(`
 printf 'Do you trust the contents of this project?'

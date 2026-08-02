@@ -14,7 +14,21 @@ type QuotaBucket = {
 
 type CaptureResult =
   | { ok: true; output: string }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      status: CaptureFailureStatus;
+      error: string;
+      transient?: true;
+    };
+
+type CaptureFailureStatus =
+  | "missing-agy"
+  | "unavailable"
+  | "sign-in-in-progress"
+  | "timeout"
+  | "malformed-output"
+  | "python-unavailable"
+  | "capture-failed";
 
 type CaptureOptions = {
   env?: NodeJS.ProcessEnv;
@@ -31,17 +45,28 @@ import base64, fcntl, os, pty, re, select, signal, struct, subprocess, sys, term
 
 TAIL_BYTES = 128 * 1024
 termination_requested = False
-cleanup_complete = False
+self_cleanup_grace = float(sys.argv[2])
+
+def self_cleanup_group():
+    try:
+        os.killpg(os.getpgrp(), signal.SIGTERM)
+    except ProcessLookupError:
+        sys.exit(0)
+    time.sleep(self_cleanup_grace)
+    os.killpg(os.getpgrp(), signal.SIGKILL)
+
+def host_is_alive(timeout):
+    ready, _, _ = select.select([4], [], [], timeout)
+    if ready and not os.read(4, 1):
+        self_cleanup_group()
 
 def anchor_group():
     while True:
-        signal.pause()
+        host_is_alive(0.25)
 
 def stop(signum, frame):
     global termination_requested
     termination_requested = True
-    if cleanup_complete:
-        anchor_group()
 
 signal.signal(signal.SIGTERM, stop)
 
@@ -72,12 +97,22 @@ def latest_frame_complete(text):
             return False
     return True
 
+def sign_in_in_progress(text):
+    patterns = (
+        r"You are currently not signed in\. Signing in\.\.\.",
+        r"(?:complete|continue|finish).{0,80}sign[- ]?in.{0,80}browser",
+        r"waiting.{0,80}(?:authentication|sign[- ]?in|browser)",
+        r"(?:authentication|sign[- ]?in).{0,80}(?:in progress|pending)",
+    )
+    return any(re.search(pattern, text, re.IGNORECASE | re.DOTALL) for pattern in patterns)
+
 master, slave = pty.openpty()
 proc = None
 buffer = bytearray()
 sent_usage = False
 trusted = False
 capture_timed_out = False
+sign_in_detected = False
 deadline = time.time() + float(sys.argv[1])
 
 try:
@@ -88,15 +123,28 @@ try:
     if env.get("TERM", "").lower() in ("", "dumb", "unknown"):
         env["TERM"] = "xterm-256color"
 
-    proc = subprocess.Popen(
-        ["agy"], stdin=slave, stdout=slave, stderr=slave, env=env,
-    )
+    try:
+        proc = subprocess.Popen(
+            ["agy"], stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True,
+        )
+    except FileNotFoundError:
+        os.close(slave)
+        slave = None
+        os.write(3, b"missing-agy\n")
+        anchor_group()
+    except OSError:
+        os.close(slave)
+        slave = None
+        os.write(3, b"unavailable\n")
+        anchor_group()
     os.close(slave)
     slave = None
 
     while time.time() < deadline and not termination_requested:
-        ready, _, _ = select.select([master], [], [], 0.25)
-        if ready:
+        ready, _, _ = select.select([master, 4], [], [], 0.25)
+        if 4 in ready:
+            host_is_alive(0)
+        if master in ready:
             try:
                 chunk = os.read(master, 65536)
             except OSError:
@@ -114,9 +162,11 @@ try:
                 os.write(master, b"/usage\r")
                 sent_usage = True
             if latest_frame_complete(text):
-                time.sleep(1)
-                ready, _, _ = select.select([master], [], [], 0.5)
-                if ready:
+                host_is_alive(1)
+                ready, _, _ = select.select([master, 4], [], [], 0.5)
+                if 4 in ready:
+                    host_is_alive(0)
+                if master in ready:
                     try:
                         buffer.extend(os.read(master, 65536))
                         if len(buffer) > TAIL_BYTES:
@@ -126,6 +176,24 @@ try:
                 text = buffer.decode("utf-8", errors="ignore")
                 if latest_frame_complete(text):
                     break
+            if sign_in_in_progress(text):
+                host_is_alive(0.5)
+                ready, _, _ = select.select([master, 4], [], [], 0.5)
+                if 4 in ready:
+                    host_is_alive(0)
+                if master in ready:
+                    try:
+                        buffer.extend(os.read(master, 65536))
+                        if len(buffer) > TAIL_BYTES:
+                            del buffer[:-TAIL_BYTES]
+                    except OSError:
+                        pass
+                if latest_frame_complete(buffer.decode("utf-8", errors="ignore")):
+                    break
+                if proc.poll() is not None:
+                    break
+                sign_in_detected = True
+                break
     if time.time() >= deadline and not termination_requested:
         capture_timed_out = True
 finally:
@@ -148,12 +216,20 @@ finally:
             except Exception:
                 pass
 
-cleanup_complete = True
 if termination_requested:
+    anchor_group()
+
+final_text = buffer.decode("utf-8", errors="ignore")
+if not latest_frame_complete(final_text) and sign_in_detected:
+    os.write(3, b"sign-in-in-progress\n")
     anchor_group()
 
 if capture_timed_out:
     os.write(3, b"timeout\n")
+    anchor_group()
+
+if not latest_frame_complete(final_text):
+    os.write(3, b"unavailable\n")
     anchor_group()
 
 sys.stdout.write(base64.b64encode(bytes(buffer)).decode("ascii"))
@@ -171,6 +247,24 @@ function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
+const HELPER_FAILURES = {
+  timeout: { ok: false, status: "timeout", error: "Antigravity quota capture timed out" },
+  "missing-agy": { ok: false, status: "missing-agy", error: "Antigravity CLI is unavailable" },
+  unavailable: { ok: false, status: "unavailable", error: "Antigravity quota is unavailable" },
+  "sign-in-in-progress": {
+    ok: false,
+    status: "sign-in-in-progress",
+    transient: true,
+    error: "Antigravity sign-in is in progress",
+  },
+} as const;
+
+type HelperFailureOutcome = keyof typeof HELPER_FAILURES;
+
+function isHelperFailureOutcome(outcome: string): outcome is HelperFailureOutcome {
+  return Object.hasOwn(HELPER_FAILURES, outcome);
+}
+
 export function captureUsageScreen(options: CaptureOptions = {}): Promise<CaptureResult> {
   const internalCaptureTimeoutMs = options.internalCaptureTimeoutMs ?? INTERNAL_CAPTURE_TIMEOUT_MS;
   const timeoutMs = options.timeoutMs ?? CAPTURE_TIMEOUT_MS;
@@ -179,11 +273,16 @@ export function captureUsageScreen(options: CaptureOptions = {}): Promise<Captur
   return new Promise((resolve) => {
     const child = spawn(
       "python3",
-      ["-c", PTY_CAPTURE_SCRIPT, String(internalCaptureTimeoutMs / 1_000)],
+      [
+        "-c",
+        PTY_CAPTURE_SCRIPT,
+        String(internalCaptureTimeoutMs / 1_000),
+        String(terminationGraceMs / 1_000),
+      ],
       {
         detached: true,
         env: options.env,
-        stdio: ["ignore", "pipe", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
       },
     );
     const chunks: Buffer[] = [];
@@ -216,7 +315,11 @@ export function captureUsageScreen(options: CaptureOptions = {}): Promise<Captur
         const encoded = Buffer.concat(chunks).toString("utf8").trim();
         return { ok: true, output: Buffer.from(encoded, "base64").toString("utf8") };
       } catch {
-        return { ok: false, error: "Antigravity quota response could not be decoded" };
+        return {
+          ok: false,
+          status: "malformed-output",
+          error: "Antigravity quota response could not be decoded",
+        };
       }
     };
 
@@ -228,15 +331,16 @@ export function captureUsageScreen(options: CaptureOptions = {}): Promise<Captur
       const outcome = controlOutput.slice(0, newline);
       if (outcome === "success") {
         stopGroup(successfulCapture);
-      } else if (outcome === "timeout") {
-        stopGroup({ ok: false, error: "Antigravity quota capture timed out" });
+      } else if (isHelperFailureOutcome(outcome)) {
+        stopGroup(HELPER_FAILURES[outcome]);
       } else {
-        stopGroup({ ok: false, error: "Antigravity quota capture failed" });
+        stopGroup({ ok: false, status: "capture-failed", error: "Antigravity quota capture failed" });
       }
     });
     child.once("error", (error: Error & { code?: string }) => {
       finish({
         ok: false,
+        status: error.code === "ENOENT" ? "python-unavailable" : "capture-failed",
         error: error.code === "ENOENT" ? "Python is unavailable for the Antigravity terminal" : "Antigravity quota capture could not start",
       });
     });
@@ -247,14 +351,14 @@ export function captureUsageScreen(options: CaptureOptions = {}): Promise<Captur
         return;
       }
       if (code !== 0) {
-        finish({ ok: false, error: "Antigravity quota capture failed" });
+        finish({ ok: false, status: "capture-failed", error: "Antigravity quota capture failed" });
         return;
       }
       finish(successfulCapture());
     });
 
     const timeout = setTimeout(() => {
-      stopGroup({ ok: false, error: "Antigravity quota capture timed out" });
+      stopGroup(HELPER_FAILURES.timeout);
     }, timeoutMs);
   });
 }
@@ -322,7 +426,11 @@ export const actions = {
 
     const parsed = parseQuotaScreen(capture.output);
     if (parsed.buckets.length !== 2) {
-      return { ok: false as const, error: "Antigravity /usage did not report model quota" };
+      return {
+        ok: false as const,
+        status: "malformed-output" as const,
+        error: "Antigravity /usage did not report model quota",
+      };
     }
 
     return {

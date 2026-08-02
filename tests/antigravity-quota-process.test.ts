@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -187,7 +188,132 @@ printf 'Models & Quota\\nAntigravity (Google AI Ultra)\\nGEMINI MODELS\\nWeekly 
       if (originalPidFile === undefined) delete process.env.AGY_PID_FILE;
       else process.env.AGY_PID_FILE = originalPidFile;
     }
+  }, 10_000);
+
+  it("reports a missing agy executable distinctly", async () => {
+    const result = await captureUsageScreen({
+      env: { ...process.env, PATH: "/usr/bin:/bin" },
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: "missing-agy",
+      error: "Antigravity CLI is unavailable",
+    });
   });
+
+  it("reports an unavailable quota source distinctly", async () => {
+    const fixture = await createAgyFixture(`
+printf 'Antigravity service unavailable\n'
+exit 1
+`);
+
+    const result = await captureUsageScreen({
+      env: fixture.env,
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: "unavailable",
+      error: "Antigravity quota is unavailable",
+    });
+  });
+
+  it("reports an in-progress sign-in as a transient source state", async () => {
+    const fixture = await createAgyFixture(`
+printf 'You are currently not signed in. Signing in...\n'
+while :; do sleep 0.02; done
+`);
+
+    const startedAt = Date.now();
+    const result = await captureUsageScreen({
+      env: fixture.env,
+      internalCaptureTimeoutMs: 5_000,
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: "sign-in-in-progress",
+      transient: true,
+      error: "Antigravity sign-in is in progress",
+    });
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it("prefers a completed quota frame over an earlier sign-in transition", async () => {
+    const fixture = await createAgyFixture(`
+printf 'You are currently not signed in. Signing in...\n'
+sleep 0.05
+printf 'Models & Quota\nAntigravity (Google AI Pro)\nGEMINI MODELS\nWeekly Limit 91%%\nCLAUDE AND GPT MODELS\nWeekly Limit 64%%\n'
+`);
+
+    const result = await captureUsageScreen({ env: fixture.env, timeoutMs: 5_000, terminationGraceMs: 100 });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(parseQuotaScreen(result.output).buckets.map((bucket) => bucket.percentRemaining)).toEqual([91, 64]);
+  });
+
+  it("reports unavailable when the source exits after a sign-in transition", async () => {
+    const fixture = await createAgyFixture(`
+printf 'You are currently not signed in. Signing in...\nAntigravity service unavailable\n'
+exit 1
+`);
+
+    const result = await captureUsageScreen({ env: fixture.env, timeoutMs: 5_000, terminationGraceMs: 100 });
+
+    expect(result).toEqual({
+      ok: false,
+      status: "unavailable",
+      error: "Antigravity quota is unavailable",
+    });
+  });
+
+  it.each([
+    {
+      name: "missing agy",
+      body: undefined,
+      expected: { ok: false, status: "missing-agy", error: "Antigravity CLI is unavailable" },
+    },
+    {
+      name: "unavailable source",
+      body: "printf 'Antigravity service unavailable\\n'\nexit 1",
+      expected: { ok: false, status: "unavailable", error: "Antigravity quota is unavailable" },
+    },
+    {
+      name: "source exiting after a sign-in transition",
+      body: "printf 'You are currently not signed in. Signing in...\\nAntigravity service unavailable\\n'\nexit 1",
+      expected: { ok: false, status: "unavailable", error: "Antigravity quota is unavailable" },
+    },
+    {
+      name: "sign-in in progress",
+      body: "printf 'You are currently not signed in. Signing in...\\n'\nwhile :; do sleep 0.02; done",
+      expected: {
+        ok: false,
+        status: "sign-in-in-progress",
+        transient: true,
+        error: "Antigravity sign-in is in progress",
+      },
+    },
+  ])(
+    "preserves the $name status through getQuota",
+    async ({ body, expected }) => {
+      const fixture = body === undefined ? undefined : await createAgyFixture(body);
+      const path = fixture?.env.PATH ?? "/usr/bin:/bin";
+      const pidFile = fixture?.pidFile;
+
+      await withProcessEnv({ PATH: path, AGY_PID_FILE: pidFile }, async () => {
+        await expect(actions.getQuota()).resolves.toEqual(expected);
+      });
+    },
+    10_000,
+  );
 
   it("kills the complete helper process group after the timeout grace period", async () => {
     const fixture = await createAgyFixture(`
@@ -205,7 +331,11 @@ done
     });
     const agyPid = Number(await readFile(fixture.pidFile, "utf8"));
 
-    expect(result).toEqual({ ok: false, error: "Antigravity quota capture timed out" });
+    expect(result).toEqual({
+      ok: false,
+      status: "timeout",
+      error: "Antigravity quota capture timed out",
+    });
     await expect(waitForProcessExit(agyPid)).resolves.toBeUndefined();
   });
 
@@ -232,7 +362,11 @@ while :; do sleep 0.02; done
     const result = await capture;
 
     try {
-      expect(result).toEqual({ ok: false, error: "Antigravity quota capture timed out" });
+      expect(result).toEqual({
+        ok: false,
+        status: "timeout",
+        error: "Antigravity quota capture timed out",
+      });
       await expect(waitForProcessExit(descendantPid, 500)).resolves.toBeUndefined();
     } finally {
       try {
@@ -262,7 +396,11 @@ while :; do sleep 0.02; done
     await waitForFile(cleanupFile);
     expect(isProcessAlive(helperPid)).toBe(true);
 
-    await expect(capture).resolves.toEqual({ ok: false, error: "Antigravity quota capture timed out" });
+    await expect(capture).resolves.toEqual({
+      ok: false,
+      status: "timeout",
+      error: "Antigravity quota capture timed out",
+    });
     await expect(waitForProcessExit(helperPid)).resolves.toBeUndefined();
     await expect(waitForProcessExit(agyPid)).resolves.toBeUndefined();
   });
@@ -293,6 +431,48 @@ printf 'Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Li
     } finally {
       try {
         process.kill(descendantPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+  });
+
+  it("self-cleans the helper process group when the host exits", async () => {
+    const fixture = await createAgyFixture(`
+echo "$PPID" > "$HELPER_PID_FILE"
+(
+  trap '' TERM HUP
+  while :; do sleep 0.02; done
+) &
+echo $! > "$DESCENDANT_PID_FILE"
+trap '' TERM
+while :; do sleep 0.02; done
+`);
+    const helperPidFile = join(fixture.directory, "helper.pid");
+    const descendantPidFile = join(fixture.directory, "descendant.pid");
+    const runner = join(fixture.directory, "capture-host.ts");
+    await writeFile(
+      runner,
+      `import { captureUsageScreen } from ${JSON.stringify(fileURLToPath(new URL("../extensions/recipes/antigravity-quota.template.ts", import.meta.url)))};\nawait captureUsageScreen({ timeoutMs: 30_000, terminationGraceMs: 100 });\n`,
+    );
+    const host = spawn(process.execPath, ["--experimental-strip-types", runner], {
+      env: { ...fixture.env, HELPER_PID_FILE: helperPidFile, DESCENDANT_PID_FILE: descendantPidFile },
+      stdio: "ignore",
+    });
+    const helperPid = Number(await waitForFile(helperPidFile));
+    const agyPid = Number(await waitForFile(fixture.pidFile));
+    const descendantPid = Number(await waitForFile(descendantPidFile));
+
+    try {
+      host.kill("SIGKILL");
+      await expect(waitForProcessExit(host.pid!)).resolves.toBeUndefined();
+      await expect(waitForProcessExit(helperPid, 1_000)).resolves.toBeUndefined();
+      await expect(waitForProcessExit(agyPid, 1_000)).resolves.toBeUndefined();
+      await expect(waitForProcessExit(descendantPid, 1_000)).resolves.toBeUndefined();
+    } finally {
+      host.kill("SIGKILL");
+      try {
+        process.kill(-helperPid, "SIGKILL");
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
@@ -355,6 +535,25 @@ printf 'CLAUDE AND GPT MODELS\\nWeekly Limit 42%%\\n'
         PATH: `${directory}:${process.env.PATH ?? ""}`,
       },
     };
+  }
+
+  async function withProcessEnv(
+    values: Record<string, string | undefined>,
+    callback: () => Promise<void>,
+  ): Promise<void> {
+    const originals = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+    try {
+      for (const [key, value] of Object.entries(values)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await callback();
+    } finally {
+      for (const [key, value] of Object.entries(originals)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   }
 
   async function waitForProcessExit(pid: number, timeoutMs = 3_000): Promise<void> {

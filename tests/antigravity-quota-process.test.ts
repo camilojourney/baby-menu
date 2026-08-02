@@ -209,6 +209,40 @@ done
     await expect(waitForProcessExit(agyPid)).resolves.toBeUndefined();
   });
 
+  it("reports the internal capture deadline as a timeout", async () => {
+    const fixture = await createAgyFixture(`
+printf 'Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Limit 91%%\\n'
+(
+  trap '' TERM HUP
+  while :; do sleep 0.02; done
+) &
+echo $! > "$DESCENDANT_PID_FILE"
+trap 'exit 0' TERM
+while :; do sleep 0.02; done
+`);
+    const descendantPidFile = join(fixture.directory, "descendant.pid");
+
+    const capture = captureUsageScreen({
+      env: { ...fixture.env, DESCENDANT_PID_FILE: descendantPidFile },
+      internalCaptureTimeoutMs: 500,
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+    const descendantPid = Number(await waitForFile(descendantPidFile));
+    const result = await capture;
+
+    try {
+      expect(result).toEqual({ ok: false, error: "Antigravity quota capture timed out" });
+      await expect(waitForProcessExit(descendantPid, 500)).resolves.toBeUndefined();
+    } finally {
+      try {
+        process.kill(descendantPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+  });
+
   it("keeps the cleaned helper alive to anchor its process group until escalation", async () => {
     const fixture = await createAgyFixture(`
 echo "$PPID" > "$HELPER_PID_FILE"

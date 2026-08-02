@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
 const CAPTURE_TIMEOUT_MS = 50_000;
+const INTERNAL_CAPTURE_TIMEOUT_MS = 35_000;
 const TERMINATION_GRACE_MS = 3_000;
 
 type QuotaBucket = {
@@ -17,6 +18,7 @@ type CaptureResult =
 
 type CaptureOptions = {
   env?: NodeJS.ProcessEnv;
+  internalCaptureTimeoutMs?: number;
   timeoutMs?: number;
   terminationGraceMs?: number;
 };
@@ -75,7 +77,8 @@ proc = None
 buffer = bytearray()
 sent_usage = False
 trusted = False
-deadline = time.time() + 35
+capture_timed_out = False
+deadline = time.time() + float(sys.argv[1])
 
 try:
     for fd in (master, slave):
@@ -123,6 +126,8 @@ try:
                 text = buffer.decode("utf-8", errors="ignore")
                 if latest_frame_complete(text):
                     break
+    if time.time() >= deadline and not termination_requested:
+        capture_timed_out = True
 finally:
     if slave is not None:
         try:
@@ -150,6 +155,10 @@ cleanup_complete = True
 if termination_requested:
     anchor_group()
 
+if capture_timed_out:
+    os.write(3, b"timeout\n")
+    anchor_group()
+
 sys.stdout.write(base64.b64encode(bytes(buffer)).decode("ascii"))
 `;
 
@@ -163,15 +172,20 @@ function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
 }
 
 export function captureUsageScreen(options: CaptureOptions = {}): Promise<CaptureResult> {
+  const internalCaptureTimeoutMs = options.internalCaptureTimeoutMs ?? INTERNAL_CAPTURE_TIMEOUT_MS;
   const timeoutMs = options.timeoutMs ?? CAPTURE_TIMEOUT_MS;
   const terminationGraceMs = options.terminationGraceMs ?? TERMINATION_GRACE_MS;
 
   return new Promise((resolve) => {
-    const child = spawn("python3", ["-c", PTY_CAPTURE_SCRIPT], {
-      detached: true,
-      env: options.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(
+      "python3",
+      ["-c", PTY_CAPTURE_SCRIPT, String(internalCaptureTimeoutMs / 1_000)],
+      {
+        detached: true,
+        env: options.env,
+        stdio: ["ignore", "pipe", "pipe", "pipe"],
+      },
+    );
     const chunks: Buffer[] = [];
     let settled = false;
     let stopping = false;
@@ -195,7 +209,10 @@ export function captureUsageScreen(options: CaptureOptions = {}): Promise<Captur
       }, terminationGraceMs);
     };
 
-    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.stdio[3]?.once("data", () => {
+      stopGroup({ ok: false, error: "Antigravity quota capture timed out" });
+    });
     child.once("error", (error: Error & { code?: string }) => {
       finish({
         ok: false,

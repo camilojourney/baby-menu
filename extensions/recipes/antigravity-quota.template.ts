@@ -148,9 +148,6 @@ finally:
             except Exception:
                 pass
 
-# A termination request comes from Node's process-group timeout path. Keep the
-# group leader alive after agy is reaped so its PGID cannot be recycled before
-# Node's grace timer safely escalates to SIGKILL.
 cleanup_complete = True
 if termination_requested:
     anchor_group()
@@ -160,6 +157,9 @@ if capture_timed_out:
     anchor_group()
 
 sys.stdout.write(base64.b64encode(bytes(buffer)).decode("ascii"))
+sys.stdout.flush()
+os.write(3, b"success\n")
+anchor_group()
 `;
 
 function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
@@ -190,6 +190,8 @@ export function captureUsageScreen(options: CaptureOptions = {}): Promise<Captur
     let settled = false;
     let stopping = false;
     let escalation: NodeJS.Timeout | undefined;
+    let stoppedResult: CaptureResult | (() => CaptureResult) | undefined;
+    let controlOutput = "";
 
     const finish = (result: CaptureResult) => {
       if (settled) return;
@@ -199,19 +201,38 @@ export function captureUsageScreen(options: CaptureOptions = {}): Promise<Captur
       resolve(result);
     };
 
-    const stopGroup = (result: CaptureResult) => {
+    const stopGroup = (result: CaptureResult | (() => CaptureResult)) => {
       if (stopping || settled) return;
       stopping = true;
+      stoppedResult = result;
       signalProcessGroup(child, "SIGTERM");
       escalation = setTimeout(() => {
         signalProcessGroup(child, "SIGKILL");
-        finish(result);
       }, terminationGraceMs);
     };
 
+    const successfulCapture = (): CaptureResult => {
+      try {
+        const encoded = Buffer.concat(chunks).toString("utf8").trim();
+        return { ok: true, output: Buffer.from(encoded, "base64").toString("utf8") };
+      } catch {
+        return { ok: false, error: "Antigravity quota response could not be decoded" };
+      }
+    };
+
     child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
-    child.stdio[3]?.once("data", () => {
-      stopGroup({ ok: false, error: "Antigravity quota capture timed out" });
+    child.stdio[3]?.on("data", (chunk: Buffer) => {
+      controlOutput += chunk.toString("utf8");
+      const newline = controlOutput.indexOf("\n");
+      if (newline < 0) return;
+      const outcome = controlOutput.slice(0, newline);
+      if (outcome === "success") {
+        stopGroup(successfulCapture);
+      } else if (outcome === "timeout") {
+        stopGroup({ ok: false, error: "Antigravity quota capture timed out" });
+      } else {
+        stopGroup({ ok: false, error: "Antigravity quota capture failed" });
+      }
     });
     child.once("error", (error: Error & { code?: string }) => {
       finish({
@@ -220,17 +241,16 @@ export function captureUsageScreen(options: CaptureOptions = {}): Promise<Captur
       });
     });
     child.once("close", (code) => {
-      if (settled || stopping) return;
+      if (settled) return;
+      if (stoppedResult !== undefined) {
+        finish(typeof stoppedResult === "function" ? stoppedResult() : stoppedResult);
+        return;
+      }
       if (code !== 0) {
         finish({ ok: false, error: "Antigravity quota capture failed" });
         return;
       }
-      try {
-        const encoded = Buffer.concat(chunks).toString("utf8").trim();
-        finish({ ok: true, output: Buffer.from(encoded, "base64").toString("utf8") });
-      } catch {
-        finish({ ok: false, error: "Antigravity quota response could not be decoded" });
-      }
+      finish(successfulCapture());
     });
 
     const timeout = setTimeout(() => {

@@ -267,6 +267,38 @@ while :; do sleep 0.02; done
     await expect(waitForProcessExit(agyPid)).resolves.toBeUndefined();
   });
 
+  it("cleans the complete helper process group after a successful capture", async () => {
+    const fixture = await createAgyFixture(`
+(
+  trap '' TERM HUP
+  while :; do sleep 0.02; done
+) &
+echo $! > "$DESCENDANT_PID_FILE"
+printf 'Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Limit 91%%\\nCLAUDE AND GPT MODELS\\nWeekly Limit 64%%\\n'
+`);
+    const descendantPidFile = join(fixture.directory, "descendant.pid");
+    const capture = captureUsageScreen({
+      env: { ...fixture.env, DESCENDANT_PID_FILE: descendantPidFile },
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    });
+    const descendantPid = Number(await waitForFile(descendantPidFile));
+    const result = await capture;
+
+    try {
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(parseQuotaScreen(result.output).buckets.map((bucket) => bucket.percentRemaining)).toEqual([91, 64]);
+      await expect(waitForProcessExit(descendantPid, 500)).resolves.toBeUndefined();
+    } finally {
+      try {
+        process.kill(descendantPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+  });
+
   it("keeps only the final rendered screen when a TUI redraws beyond the old byte cap", async () => {
     const fixture = await createAgyFixture(`
 i=0
@@ -277,7 +309,7 @@ done
 printf '\\nModels & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Limit 100%%\\nCLAUDE AND GPT MODELS\\nWeekly Limit 88%%\\n'
 `);
 
-    const result = await captureUsageScreen({ env: fixture.env, timeoutMs: 5_000 });
+    const result = await captureUsageScreen({ env: fixture.env, timeoutMs: 5_000, terminationGraceMs: 100 });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -294,7 +326,7 @@ sleep 1.2
 printf 'CLAUDE AND GPT MODELS\\nWeekly Limit 42%%\\n'
 `);
 
-    const result = await captureUsageScreen({ env: fixture.env, timeoutMs: 5_000 });
+    const result = await captureUsageScreen({ env: fixture.env, timeoutMs: 5_000, terminationGraceMs: 100 });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;

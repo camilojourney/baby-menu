@@ -64,6 +64,16 @@ def anchor_group():
     while True:
         host_is_alive(0.25)
 
+def report(outcome, output=None):
+    try:
+        if output is not None:
+            sys.stdout.write(output)
+            sys.stdout.flush()
+        os.write(3, (outcome + "\n").encode())
+    except Exception:
+        self_cleanup_group()
+    anchor_group()
+
 def stop(signum, frame):
     global termination_requested
     termination_requested = True
@@ -130,13 +140,11 @@ try:
     except FileNotFoundError:
         os.close(slave)
         slave = None
-        os.write(3, b"missing-agy\n")
-        anchor_group()
+        report("missing-agy")
     except OSError:
         os.close(slave)
         slave = None
-        os.write(3, b"unavailable\n")
-        anchor_group()
+        report("unavailable")
     os.close(slave)
     slave = None
 
@@ -221,21 +229,15 @@ if termination_requested:
 
 final_text = buffer.decode("utf-8", errors="ignore")
 if not latest_frame_complete(final_text) and sign_in_detected:
-    os.write(3, b"sign-in-in-progress\n")
-    anchor_group()
+    report("sign-in-in-progress")
 
 if capture_timed_out:
-    os.write(3, b"timeout\n")
-    anchor_group()
+    report("timeout")
 
 if not latest_frame_complete(final_text):
-    os.write(3, b"unavailable\n")
-    anchor_group()
+    report("unavailable")
 
-sys.stdout.write(base64.b64encode(bytes(buffer)).decode("ascii"))
-sys.stdout.flush()
-os.write(3, b"success\n")
-anchor_group()
+report("success", base64.b64encode(bytes(buffer)).decode("ascii"))
 `;
 
 function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {

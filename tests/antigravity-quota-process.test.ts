@@ -479,6 +479,54 @@ while :; do sleep 0.02; done
     }
   });
 
+  it("self-cleans the helper process group when the host exits during outcome reporting", async () => {
+    const fixture = await createAgyFixture(`
+echo "$PPID" > "$HELPER_PID_FILE"
+(
+  trap '' TERM HUP
+  while :; do sleep 0.02; done
+) &
+echo $! > "$DESCENDANT_PID_FILE"
+trap 'echo cleaning > "$CLEANUP_FILE"; sleep 0.5; exit 0' TERM
+printf 'Models & Quota\\nAntigravity (Google AI Pro)\\nGEMINI MODELS\\nWeekly Limit 91%%\\nCLAUDE AND GPT MODELS\\nWeekly Limit 64%%\\n'
+while :; do sleep 0.02; done
+`);
+    const helperPidFile = join(fixture.directory, "helper.pid");
+    const descendantPidFile = join(fixture.directory, "descendant.pid");
+    const cleanupFile = join(fixture.directory, "cleanup.started");
+    const runner = join(fixture.directory, "capture-host.ts");
+    await writeFile(
+      runner,
+      `import { captureUsageScreen } from ${JSON.stringify(fileURLToPath(new URL("../extensions/recipes/antigravity-quota.template.ts", import.meta.url)))};\nawait captureUsageScreen({ timeoutMs: 30_000, terminationGraceMs: 100 });\n`,
+    );
+    const host = spawn(process.execPath, ["--experimental-strip-types", runner], {
+      env: {
+        ...fixture.env,
+        HELPER_PID_FILE: helperPidFile,
+        DESCENDANT_PID_FILE: descendantPidFile,
+        CLEANUP_FILE: cleanupFile,
+      },
+      stdio: "ignore",
+    });
+    const helperPid = Number(await waitForFile(helperPidFile));
+    const descendantPid = Number(await waitForFile(descendantPidFile));
+
+    try {
+      await waitForFile(cleanupFile);
+      host.kill("SIGKILL");
+      await expect(waitForProcessExit(host.pid!)).resolves.toBeUndefined();
+      await expect(waitForProcessExit(helperPid, 1_000)).resolves.toBeUndefined();
+      await expect(waitForProcessExit(descendantPid, 1_000)).resolves.toBeUndefined();
+    } finally {
+      host.kill("SIGKILL");
+      try {
+        process.kill(-helperPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+  });
+
   it("keeps only the final rendered screen when a TUI redraws beyond the old byte cap", async () => {
     const fixture = await createAgyFixture(`
 i=0

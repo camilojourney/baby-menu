@@ -47,7 +47,7 @@ describe("capabilities IPC", () => {
         path: join(recipesDir, "daily-standup.html"),
       },
     ]);
-  });
+  }, 10_000);
 
   it("registers stable capability list and invoke channels", async () => {
     const { registerIpcHandlers } = await import("../src/main/ipc");

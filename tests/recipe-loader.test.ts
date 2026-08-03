@@ -12,6 +12,7 @@ describe("loadRecipes", () => {
     const recipes = await loadRecipes(new URL("../extensions/recipes/", import.meta.url));
 
     expect(recipes.map((recipe) => recipe.id).sort()).toEqual([
+      "antigravity-quota",
       "claude-code-quota",
       "codex-quota",
       "copilot-quota",
@@ -23,6 +24,7 @@ describe("loadRecipes", () => {
 
   it("keeps quota recipes self-contained for agent implementation", async () => {
     const recipeUrls = [
+      new URL("../extensions/recipes/antigravity-quota.html", import.meta.url),
       new URL("../extensions/recipes/claude-code-quota.html", import.meta.url),
       new URL("../extensions/recipes/codex-quota.html", import.meta.url),
       new URL("../extensions/recipes/copilot-quota.html", import.meta.url),
@@ -43,6 +45,28 @@ describe("loadRecipes", () => {
       expect(html).not.toContain("<style>");
       expect(html).not.toMatch(/Review\s+<a|for discovery and behavior ideas|another repository/i);
     }
+  });
+
+  it("keeps Antigravity capture ownership and buffering safe", async () => {
+    const html = await readFile(new URL("../extensions/recipes/antigravity-quota.html", import.meta.url), "utf8");
+
+    expect(html).toContain("detached: true");
+    expect(html).toContain("without <code>start_new_session=True</code>");
+    expect(html).toContain("signal <code>-child.pid</code> with SIGTERM");
+    expect(html).toContain("live group leader anchors the PGID");
+    expect(html).toContain("dedicated host-liveness pipe on fd 4");
+    expect(html).toContain("Monitor fd 4 during capture and every anchor state");
+    expect(html).toContain("Antigravity sign-in is in progress");
+    expect(html).toContain("Python isolated mode");
+    expect(html).toContain("fresh neutral directory under the OS temporary root");
+    expect(html).toContain("matching <code>PWD</code>");
+    expect(html).toContain("Never answer a project-trust prompt");
+    expect(html).toContain("Antigravity requested project trust during quota inspection");
+    expect(html).toContain("configured three-second grace period when reaping the direct child");
+    expect(html).toContain("recipes/antigravity-quota.template.ts");
+    expect(html).toContain("rolling 128 KiB raw PTY tail");
+    expect(html).toContain("35-second internal capture deadline and a 50-second Node timeout");
+    expect(html).toContain("Do not sweep historical bare <code>agy</code> processes");
   });
 
   it("keeps Copilot transient 403 handling separate from token rejection", async () => {

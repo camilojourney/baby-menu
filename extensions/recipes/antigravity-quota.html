@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en" data-theme="wireframe">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Antigravity Quota Widget</title>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5/themes.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  </head>
+  <body class="bg-base-200 text-base-content">
+    <main class="mx-auto flex max-w-4xl flex-col gap-6 p-6 text-base leading-7">
+      <header class="card border border-base-300 bg-base-100">
+        <div class="card-body">
+          <div class="badge badge-outline">Baby Menu recipe</div>
+          <h1 class="card-title text-3xl">Antigravity quota</h1>
+          <p>
+            Build a user-installed widget that reads both weekly model groups from the real
+            <code>agy /usage</code> terminal screen. This recipe is self-contained and does not require an external codebase or guide.
+          </p>
+        </div>
+      </header>
+
+      <section class="card border border-base-300 bg-base-100">
+        <div class="card-body">
+          <h2 class="card-title">Capability</h2>
+          <p>
+            Show Gemini models and Claude + GPT models as separate weekly quota buckets. Display percent used and remaining,
+            the Google AI plan when present, a checked timestamp, and an explicit unavailable error when live capture fails.
+            Never fabricate quota and never describe an idle prompt as consuming quota.
+          </p>
+          <h3 class="text-xl font-semibold">Expected user-facing behavior</h3>
+          <ul class="list-disc space-y-2 pl-6">
+            <li>Refresh only while the widget is visible, using the slowest acceptable interval of five minutes.</li>
+            <li>Keep the last good result visibly stale when a later refresh fails.</li>
+            <li>Distinguish unavailable, sign-in-in-progress, trust-required, timeout, malformed output, and capture failures.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="card border border-base-300 bg-base-100">
+        <div class="card-body">
+          <h2 class="card-title">Recommended Data Source Order</h2>
+          <ol class="list-decimal space-y-2 pl-6">
+            <li>Run the installed <code>agy</code> CLI in a pseudo-terminal and open <code>/usage</code>.</li>
+            <li>Parse only the final rendered screen after terminal escape sequences are removed.</li>
+            <li>If the named source is unavailable, return a structured error. Do not substitute sample data.</li>
+          </ol>
+          <div class="alert alert-warning">
+            <span>Inspect the real named CLI with redacted output before writing or changing the parser. Never print credentials or raw provider data.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card border border-base-300 bg-base-100">
+        <div class="card-body">
+          <h2 class="card-title">Implementation Contract</h2>
+          <p>
+            Put filesystem, shell, process, and terminal access in <code>antigravity-quota/server.ts</code> behind
+            <code>window.babyMenu.capabilities.invoke("antigravity-quota", "getQuota")</code>. Do not add a preload method.
+            Keep renderer state in <code>store.ts</code>, components in <code>components.tsx</code>, and the descriptor in <code>widget.tsx</code>.
+            Copy the shipped sibling template <code>recipes/antigravity-quota.template.ts</code> to the extension's <code>server.ts</code>
+            rather than recreating its process ownership logic.
+          </p>
+          <h3 class="text-xl font-semibold">Process ownership</h3>
+          <ul class="list-disc space-y-2 pl-6">
+            <li>Spawn the Python PTY helper from Node with <code>detached: true</code> and Python isolated mode (<code>python3 -I -c</code>).</li>
+            <li>Create a fresh neutral directory under the OS temporary root for each probe, launch the helper and <code>agy --new-project</code> there with a matching <code>PWD</code>, and remove it after group cleanup so quota inspection never opens an existing project or requires project trust.</li>
+            <li>Never answer a project-trust prompt. Stop capture and return <code>Antigravity requested project trust during quota inspection</code> if one appears despite the neutral directory.</li>
+            <li>Give the helper a dedicated host-liveness pipe on fd 4. Launch <code>agy</code> without <code>start_new_session=True</code> and with inherited descriptors closed, so helper and CLI stay in the same process group but only the helper owns the liveness pipe.</li>
+            <li>After any helper-reported outcome or the Node timeout, signal <code>-child.pid</code> with SIGTERM, allow a three-second grace period, then signal the same group with SIGKILL.</li>
+            <li>Install a Python SIGTERM handler so its <code>finally</code> block can terminate and reap <code>agy</code>, then keep the helper alive after reporting its outcome until Node escalates. The live group leader anchors the PGID so it cannot be recycled during the grace period.</li>
+            <li>Monitor fd 4 during capture and every anchor state. EOF proves the Node host exited, so the still-live group leader must signal its own PGID with SIGTERM, wait only the configured grace period, and then SIGKILL the group. Do not independently exit the helper while the lease remains open because a delayed Node timer could otherwise signal a recycled PGID.</li>
+            <li>Put all Python work after <code>Popen</code> inside <code>try/finally</code>, use the configured three-second grace period when reaping the direct child, and wait after both terminate and kill so normal helper exit proves <code>agy</code> was reaped.</li>
+            <li>Use a 35-second internal capture deadline and a 50-second Node timeout, leaving cleanup and encoding margin.</li>
+            <li>Keep only a rolling 128 KiB raw PTY tail. Do not kill the helper merely because a redrawing TUI crossed a Node output cap.</li>
+            <li>Do not sweep historical bare <code>agy</code> processes. A shared cwd, command name, or Baby Menu ancestor cannot prove ownership and could match a real user or worker session.</li>
+          </ul>
+          <h3 class="text-xl font-semibold">Parser contract</h3>
+          <p>
+            Strip OSC, CSI, and control sequences. Parse <code>GEMINI MODELS</code> and <code>CLAUDE AND GPT MODELS</code>, each followed by
+            <code>Weekly Limit</code> and a percentage. Clamp remaining percentage to 0 through 100 and compute used as
+            <code>100 - percentRemaining</code>. Capture a parenthesized <code>Google AI ...</code> plan when present.
+          </p>
+          <h3 class="text-xl font-semibold">Source outcomes</h3>
+          <p>
+            Report a missing <code>agy</code> executable as <code>Antigravity CLI is unavailable</code>, an installed source that exits without a complete quota frame as <code>Antigravity quota is unavailable</code>, an active browser authentication flow as <code>Antigravity sign-in is in progress</code>, and an unexpected trust prompt as <code>Antigravity requested project trust during quota inspection</code>. The sign-in-in-progress result is transient and must not be replaced by a hard failure or timeout. Keep the separate trust-required, capture-timeout, and malformed-frame results.
+          </p>
+          <h3 class="text-xl font-semibold">Server action response shape</h3>
+          <div class="mockup-code text-sm">
+            <pre><code>type Result =
+  | { ok: true; data: {
+      source: "agy /usage";
+      plan?: string;
+      checkedAt: string;
+      buckets: Array&lt;{
+        id: "gemini" | "claude-gpt";
+        label: string;
+        percentUsed: number;
+        percentRemaining: number;
+        windowLabel: "weekly";
+      }&gt;;
+    } }
+  | {
+      ok: false;
+      status: "missing-agy" | "unavailable" | "sign-in-in-progress" | "trust-required" | "timeout" | "malformed-output" | "python-unavailable" | "capture-failed";
+      error: string;
+      transient?: true;
+    };</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="card border border-base-300 bg-base-100">
+        <div class="card-body">
+          <h2 class="card-title">Interactive demo</h2>
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <article class="card border border-base-300 bg-base-100">
+              <div class="card-body gap-3">
+                <div class="flex items-center justify-between"><strong>Gemini models</strong><span class="badge badge-success">100% left</span></div>
+                <progress class="progress progress-success" value="0" max="100"></progress>
+                <span class="text-sm opacity-70">Weekly - 0% used</span>
+              </div>
+            </article>
+            <article class="card border border-base-300 bg-base-100">
+              <div class="card-body gap-3">
+                <div class="flex items-center justify-between"><strong>Claude + GPT</strong><span class="badge badge-success">100% left</span></div>
+                <progress class="progress progress-success" value="0" max="100"></progress>
+                <span class="text-sm opacity-70">Weekly - 0% used</span>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="card border border-base-300 bg-base-100">
+        <div class="card-body">
+          <h2 class="card-title">Acceptance criteria</h2>
+          <ul class="list-disc space-y-2 pl-6">
+            <li>An end-to-end process test proves timeout escalation leaves no fake <code>agy</code> descendant alive.</li>
+            <li>A host-exit test SIGKILLs Node during capture and proves fd 4 EOF triggers bounded self-cleanup of the helper, <code>agy</code>, and a surviving descendant.</li>
+            <li>A successful capture test proves process-group cleanup leaves no fake <code>agy</code> descendant alive while preserving decoded quota output.</li>
+            <li>A timeout test proves the helper remains the group leader until escalation, preventing a stale PGID signal.</li>
+            <li>A redraw test emits more than 256 KiB, returns successfully from the rolling tail, and preserves both quota buckets.</li>
+            <li>Focused tests preserve Python import isolation, neutral cwd, no trust-prompt consent, configured cleanup grace, and distinct missing-CLI, unavailable-source, sign-in-in-progress, trust-required, internal-timeout, and outer-timeout results.</li>
+            <li>Tests preserve the normalized response shape and verify no other quota extension is modified.</li>
+            <li>Verify the completed server action against the real <code>agy /usage</code> source using redacted output only.</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

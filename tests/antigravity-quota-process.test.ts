@@ -662,7 +662,7 @@ while :; do sleep 0.02; done
     }
   });
 
-  it("cleans the helper process group after an unexpected PTY write failure", async () => {
+  it("cleans the helper process group when the PTY peer exits before quota capture", async () => {
     const fixture = await createAgyFixture(`
 (
   trap '' TERM HUP
@@ -670,9 +670,9 @@ while :; do sleep 0.02; done
 ) </dev/null >/dev/null 2>&1 &
 echo $! > "$DESCENDANT_PID_FILE"
 printf '? for shortcuts\n'
-exec 0>&- 1>&- 2>&-
-trap '' TERM
-while :; do sleep 0.02; done
+# Exit before the helper can capture a quota screen. The surviving descendant
+# remains in the helper's process group and must still be cleaned up.
+exit 0
 `);
     const descendantPidFile = join(fixture.directory, "descendant.pid");
     const capture = captureUsageScreen({
@@ -686,8 +686,8 @@ while :; do sleep 0.02; done
     try {
       expect(result).toEqual({
         ok: false,
-        status: "capture-failed",
-        error: "Antigravity quota capture failed",
+        status: "unavailable",
+        error: "Antigravity quota is unavailable",
       });
       await expect(waitForProcessExit(descendantPid, 500)).resolves.toBeUndefined();
     } finally {

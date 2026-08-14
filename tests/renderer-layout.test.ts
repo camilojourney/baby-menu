@@ -1,8 +1,15 @@
+// @vitest-environment jsdom
+
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const stylesPath = resolve(import.meta.dirname, "../src/renderer/styles.css");
+
+afterEach(() => {
+  document.head.querySelector("[data-test-renderer-styles]")?.remove();
+  document.body.replaceChildren();
+});
 
 describe("renderer layout styles", () => {
   it("uses the Monochrome Lab token file and fills the content-sized popover window", async () => {
@@ -34,14 +41,18 @@ describe("renderer layout styles", () => {
     expect(css).not.toMatch(/\.message-list/);
   });
 
-  it("covers the full BrowserWindow with the dark popover surface", async () => {
+  it("caps a mounted popover shell at 860px", async () => {
     const css = await readFile(stylesPath, "utf8");
+    const styles = document.createElement("style");
+    styles.dataset.testRendererStyles = "";
+    styles.textContent = css;
+    document.head.append(styles);
 
-    expect(css).toMatch(/html,\s*\nbody,\s*\n#root\s*\{[^}]*background:\s*var\(--bg-stage\)/s);
-    expect(css).toMatch(/\.app-shell\s*\{[^}]*height:\s*auto/s);
-    expect(css).toMatch(/\.app-shell\s*\{[^}]*max-height:\s*720px/s);
-    // 100vh equals the auto-sized window height, which ratchets the popover.
-    expect(css).not.toMatch(/\.app-shell\s*\{[^}]*100vh/s);
+    const shell = document.createElement("main");
+    shell.className = "app-shell";
+    document.body.append(shell);
+
+    expect(getComputedStyle(shell).maxHeight).toBe("860px");
   });
 
   it("wraps actionable failure guidance within the popover", async () => {

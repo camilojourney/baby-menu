@@ -38,7 +38,7 @@ brew install --cask kunchenguid/tap/baby-menu
 open -a "Baby Menu"
 ```
 
-Click the tray icon, then ask for a widget in the composer such as:
+Click the tray icon, or press Control-Option-B to toggle the popover, then ask for a widget in the composer such as:
 
 ```text
 add a CPU usage widget that shows current load in %

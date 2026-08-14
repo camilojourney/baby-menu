@@ -1,4 +1,4 @@
-import { app, BrowserWindow, screen, shell, type Rectangle } from "electron";
+import { app, BrowserWindow, globalShortcut, screen, shell, type Rectangle } from "electron";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BabyMenuCustomAgentInput, BabyMenuSettings } from "../shared/contracts";
@@ -43,6 +43,9 @@ let popoverWindow: BrowserWindow | null = null;
 let activeTray: BabyMenuTray | null = null;
 let latestTrayBounds: Rectangle | null = null;
 let latestPopoverSize: Size = DEFAULT_POPOVER_SIZE;
+let toggleShortcutRegistered = false;
+
+const BABY_MENU_TOGGLE_SHORTCUT = "Control+Option+B";
 
 export function getActiveBabyMenuTray(): BabyMenuTray | null {
   return activeTray;
@@ -92,7 +95,12 @@ async function togglePopover(trayBounds: Rectangle): Promise<void> {
   }
 
   const display = screen.getDisplayNearestPoint({ x: trayBounds.x, y: trayBounds.y });
-  window.setBounds(calculatePopoverBounds(trayBounds, display.workArea, latestPopoverSize));
+  // Retain the renderer's requested canvas size, but re-clamp it for the
+  // display that owns the current tray icon. A shortcut can be invoked after
+  // the icon moved between displays, so a previously valid 860px canvas must
+  // not extend past a smaller display's usable work area.
+  const popoverSize = responsivePopoverSize(latestPopoverSize, display.workArea);
+  window.setBounds(calculatePopoverBounds(trayBounds, display.workArea, popoverSize));
   setPopoverKeyWindowActive(true);
   window.show();
   window.focus();
@@ -102,6 +110,26 @@ async function togglePopover(trayBounds: Rectangle): Promise<void> {
   const telemetry = getDefaultTelemetry();
   telemetry.pageview("/popover");
   telemetry.track("popover_open");
+}
+
+function togglePopoverFromActiveTray(): void {
+  if (!activeTray) return;
+  void togglePopover(activeTray.getBounds());
+}
+
+function registerToggleShortcut(): void {
+  if (toggleShortcutRegistered) return;
+  if (!globalShortcut.register(BABY_MENU_TOGGLE_SHORTCUT, togglePopoverFromActiveTray)) {
+    console.warn(`[baby-menu] failed to register global shortcut ${BABY_MENU_TOGGLE_SHORTCUT}`);
+    return;
+  }
+  toggleShortcutRegistered = true;
+}
+
+function unregisterToggleShortcut(): void {
+  if (!toggleShortcutRegistered) return;
+  globalShortcut.unregister(BABY_MENU_TOGGLE_SHORTCUT);
+  toggleShortcutRegistered = false;
 }
 
 // baby-menu runs as a macOS accessory app (dock hidden) so it has no permanent dock icon. But an
@@ -302,6 +330,7 @@ export async function startBabyMenuApp(): Promise<void> {
     },
     { iconPath: paths.trayIconPath },
   );
+  registerToggleShortcut();
 
   if (process.env.BABY_MENU_OPEN_POPOVER_ON_START === "1") {
     await togglePopover(activeTray.getBounds());
@@ -327,6 +356,7 @@ export async function startBabyMenuApp(): Promise<void> {
   app.on("activate", () => undefined);
   app.on("window-all-closed", () => undefined);
   app.on("before-quit", () => {
+    unregisterToggleShortcut();
     backgroundTasks.stop();
     database.close();
     void telemetry.close(1_000);

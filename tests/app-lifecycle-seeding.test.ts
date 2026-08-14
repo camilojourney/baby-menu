@@ -28,6 +28,7 @@ const electronApp = {
   on: vi.fn(),
   whenReady: vi.fn(async () => undefined),
 };
+const globalShortcut = { register: vi.fn(() => true), unregister: vi.fn() };
 const browserWindowInstance = {
   isDestroyed: vi.fn(() => false),
   isVisible: vi.fn(() => false),
@@ -44,6 +45,7 @@ const browserWindowInstance = {
 vi.mock("electron", () => ({
   app: electronApp,
   BrowserWindow: vi.fn(() => browserWindowInstance),
+  globalShortcut,
   protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn() },
   screen: { getDisplayNearestPoint: vi.fn(() => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } })) },
   shell: { openExternal: vi.fn(async () => undefined) },

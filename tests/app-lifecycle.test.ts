@@ -43,6 +43,10 @@ const BrowserWindow = vi.fn(function BrowserWindowMock() {
 const getDisplayNearestPoint = vi.fn(() => ({
   workArea: { x: 0, y: 0, width: 1440, height: 900 },
 }));
+const globalShortcut = {
+  register: vi.fn((_accelerator: string, _callback: () => void) => true),
+  unregister: vi.fn(),
+};
 const protocol = {
   registerSchemesAsPrivileged: vi.fn(),
   handle: vi.fn(),
@@ -57,6 +61,7 @@ const telemetryClient = {
 vi.mock("electron", () => ({
   app: electronApp,
   BrowserWindow,
+  globalShortcut,
   protocol,
   screen: { getDisplayNearestPoint },
   shell: { openExternal: vi.fn(async () => undefined) },
@@ -141,6 +146,8 @@ describe("startBabyMenuApp", () => {
     });
     browserWindowInstance.isDestroyed.mockReturnValue(false);
     browserWindowInstance.isVisible.mockReturnValue(false);
+    globalShortcut.register.mockImplementation((_accelerator: string, _callback: () => void) => true);
+    getDisplayNearestPoint.mockReturnValue({ workArea: { x: 0, y: 0, width: 1440, height: 900 } });
     trayInstance.getBounds.mockReturnValue({ x: 100, y: 10, width: 24, height: 24 });
     delete process.env.BABY_MENU_OPEN_POPOVER_ON_START;
     delete process.env.BABY_MENU_REMOTE_DEBUGGING_PORT;
@@ -210,6 +217,77 @@ describe("startBabyMenuApp", () => {
       iconPath: "/repo/assets/tray/baby_menuTemplate.png",
     });
     expect(appModule.getActiveBabyMenuTray?.()).toBe(trayInstance);
+  });
+
+  it("registers Control+Option+B once and toggles from the current tray bounds", async () => {
+    const appModule = await import("../src/main/app");
+
+    await appModule.startBabyMenuApp();
+    await appModule.startBabyMenuApp();
+
+    expect(globalShortcut.register).toHaveBeenCalledTimes(1);
+    expect(globalShortcut.register).toHaveBeenCalledWith("Control+Option+B", expect.any(Function));
+    const shortcutCallback = globalShortcut.register.mock.calls[0]?.[1];
+    trayInstance.getBounds.mockReturnValue({ x: 1000, y: 10, width: 24, height: 24 });
+
+    shortcutCallback?.();
+
+    await vi.waitFor(() => expect(browserWindowInstance.show).toHaveBeenCalledTimes(1));
+    expect(browserWindowInstance.setBounds).toHaveBeenLastCalledWith({ x: 760, y: 42, width: 504, height: 620 });
+    expect(browserWindowInstance.focus).toHaveBeenCalledTimes(1);
+
+    browserWindowInstance.isVisible.mockReturnValue(true);
+    browserWindowInstance.hide.mockClear();
+    browserWindowInstance.setBounds.mockClear();
+    browserWindowInstance.focus.mockClear();
+
+    shortcutCallback?.();
+
+    await vi.waitFor(() => expect(browserWindowInstance.hide).toHaveBeenCalledTimes(1));
+    expect(browserWindowInstance.setBounds).not.toHaveBeenCalled();
+    expect(browserWindowInstance.focus).not.toHaveBeenCalled();
+  });
+
+  it("warns when the global shortcut cannot be registered and does not unregister it", async () => {
+    globalShortcut.register.mockReturnValue(false);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const appModule = await import("../src/main/app");
+
+    await appModule.startBabyMenuApp();
+    const beforeQuitHandlers = electronApp.on.mock.calls.filter(([event]) => event === "before-quit").map(([, handler]) => handler);
+    beforeQuitHandlers.forEach((handler) => handler());
+
+    expect(warn).toHaveBeenCalledWith("[baby-menu] failed to register global shortcut Control+Option+B");
+    expect(globalShortcut.unregister).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("unregisters the global toggle shortcut only once during shutdown", async () => {
+    const appModule = await import("../src/main/app");
+
+    await appModule.startBabyMenuApp();
+    await appModule.startBabyMenuApp();
+    const beforeQuitHandlers = electronApp.on.mock.calls.filter(([event]) => event === "before-quit").map(([, handler]) => handler);
+    beforeQuitHandlers.forEach((handler) => handler());
+
+    expect(globalShortcut.unregister).toHaveBeenCalledTimes(1);
+    expect(globalShortcut.unregister).toHaveBeenCalledWith("Control+Option+B");
+  });
+
+  it("clamps a prior 860px layout size to the current tray display before opening", async () => {
+    getDisplayNearestPoint.mockReturnValue({ workArea: { x: 0, y: 0, width: 700, height: 600 } });
+    const appModule = await import("../src/main/app");
+
+    await appModule.startBabyMenuApp();
+    const popoverController = registerIpcHandlers.mock.calls.at(-1)?.[4];
+    popoverController.setContentSize({ width: 504, height: 2000 });
+    const onTrayClick = createBabyMenuTray.mock.calls.at(-1)?.[0];
+
+    await onTrayClick?.({ x: 100, y: 10, width: 24, height: 24 });
+
+    await vi.waitFor(() =>
+      expect(browserWindowInstance.setBounds).toHaveBeenLastCalledWith({ x: 8, y: 8, width: 504, height: 584 }),
+    );
   });
 
   it("still creates the tray when extension workspace seeding fails", async () => {
